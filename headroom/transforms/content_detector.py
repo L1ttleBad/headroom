@@ -45,7 +45,10 @@ class DetectionResult:
 
 # Patterns for detection
 _SEARCH_RESULT_PATTERN = re.compile(
-    r"^[^\s:]+:\d+:"  # file:line: format (grep -n style)
+    # file:line: (grep -n style) and file-line- (ripgrep context lines).
+    # ripgrep prints matched lines with ``:`` separators and context lines with
+    # ``-`` separators; accept both so context lines are detected too.
+    r"^[^\s:]+[-:]\d+[-:]"
 )
 
 # A markdown table separator row, e.g. "| --- | :--: |" or "---|---".

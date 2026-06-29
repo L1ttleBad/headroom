@@ -727,7 +727,11 @@ class ContentRouterConfig:
 # Patterns for detecting mixed content
 _CODE_FENCE_PATTERN = re.compile(r"^```(\w*)\s*$", re.MULTILINE)
 _JSON_BLOCK_START = re.compile(r"^\s*[\[{]", re.MULTILINE)
-_SEARCH_RESULT_PATTERN = re.compile(r"^\S+:\d+:", re.MULTILINE)
+# Match both grep -n style (file:line:) and ripgrep context lines (file-line-).
+# ripgrep emits matched lines as ``path:lineno:content`` but surrounding context
+# lines as ``path-lineno-content`` (dash separators). The original colon-only
+# pattern dropped context lines, so they were not routed to the search compressor.
+_SEARCH_RESULT_PATTERN = re.compile(r"^[^\s:]+[-:]\d+[-:]", re.MULTILINE)
 _PROSE_PATTERN = re.compile(r"[A-Z][a-z]+\s+\w+\s+\w+")
 
 
