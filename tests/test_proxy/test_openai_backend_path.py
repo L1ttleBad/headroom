@@ -196,6 +196,72 @@ def test_backend_response_falls_back_to_openai_cached_tokens_when_bedrock_keys_a
     assert call["cache_write_tokens"] == 300
 
 
+def test_backend_response_records_cache_stats_in_request_outcome():
+    """Regression: the non-streaming backend path must thread cache stats into
+    the RequestOutcome, not just the PrefixCacheTracker.
+
+    The path computed ``cache_read_tokens`` and fed it to
+    ``update_from_response`` but dropped it when constructing RequestOutcome,
+    so every ``headroom perf`` / dashboard row reported
+    ``cache_read=0 cache_write=0 cache_hit_pct=0`` even when the upstream
+    returned real cache hits.
+    """
+    config = _make_config()
+    response_body = {
+        "id": "chatcmpl-cache-outcome",
+        "object": "chat.completion",
+        "model": "gpt-4o-mini",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hi!"},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 1000,
+            "completion_tokens": 20,
+            "total_tokens": 1020,
+            # Pure OpenAI shape: only prompt_tokens_details.cached_tokens.
+            "prompt_tokens_details": {"cached_tokens": 700},
+        },
+    }
+
+    captured: list = []
+    mock_backend = _make_mock_backend(response_body)
+    with patch("headroom.proxy.server.AnyLLMBackend", return_value=mock_backend):
+        app = create_app(config)
+        with TestClient(app) as client:
+            _install_tracker_stub(client)
+            proxy = client.app.state.proxy
+            proxy._record_request_outcome = AsyncMock(
+                side_effect=lambda outcome: captured.append(outcome)
+            )
+
+            resp = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": False,
+                },
+                headers={"Authorization": "Bearer test-key"},
+            )
+
+    assert resp.status_code == 200, resp.text
+    assert len(captured) == 1, captured
+    outcome = captured[0]
+    # cache_read must survive into the outcome (was 0 before the fix).
+    assert outcome.cache_read_tokens == 700, (
+        f"RequestOutcome dropped cache_read (got {outcome.cache_read_tokens}); "
+        "perf/dashboard would report cache_read=0 despite a real cache hit"
+    )
+    # OpenAI shape has no explicit write counter → inferred = 1000 - 700 = 300.
+    assert outcome.cache_write_tokens == 300
+    assert outcome.uncached_input_tokens == 300
+    assert outcome.cache_hit_pct > 0
+
+
 def test_backend_response_with_ccr_tool_call_is_intercepted_and_resolved():
     """OpenAI-shape response carrying headroom_retrieve → CCR handler resolves it."""
     config = _make_config()
