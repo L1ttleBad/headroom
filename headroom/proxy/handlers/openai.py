@@ -3250,6 +3250,19 @@ class OpenAIHandlerMixin:
         else:
             url = build_copilot_upstream_url(self.OPENAI_API_URL, "/v1/responses")
 
+        # Pre-compression snapshot of the canonical Responses conversation
+        # (``body["input"]``). The synthetic ``messages`` list built above is a
+        # minimal placeholder and does NOT carry the real list-typed ``input``,
+        # so logging it yields an empty ``request_messages``. Snapshot the real
+        # input here (post memory-injection, pre-compression) so that, when
+        # ``log_full_messages`` is on, we can log the pre/post pair and diff
+        # exactly what compression removed. Only pay the deepcopy cost when the
+        # gate is enabled.
+        log_full_messages = getattr(self.config, "log_full_messages", False)
+        pre_compression_input = (
+            copy.deepcopy(body.get("input")) if log_full_messages else None
+        )
+
         # The standalone Rust proxy has native /v1/responses item handling,
         # but the default CLI runtime is this Python proxy. Compress the
         # Python runtime path here by extracting mutable Responses text into
@@ -3572,6 +3585,30 @@ class OpenAIHandlerMixin:
                 # it correctly.
                 from headroom.proxy.helpers import compute_turn_id
 
+                # ``request_messages`` / ``compressed_messages`` for the
+                # Responses API must come from ``body["input"]`` (the canonical
+                # field), NOT the synthetic ``messages`` placeholder — otherwise
+                # they log as empty. Gate on ``log_full_messages``; log the
+                # pre-compression snapshot as ``request_messages`` and the sent
+                # (post-compression) input as ``compressed_messages`` so the two
+                # stay diffable. ``str``-typed input is normalized to a single
+                # user message for a consistent list[dict] shape.
+                def _normalize_responses_input(value: Any) -> list[dict] | None:
+                    if value is None:
+                        return None
+                    if isinstance(value, str):
+                        return [{"role": "user", "content": value}]
+                    if isinstance(value, list):
+                        return value
+                    return None
+
+                if log_full_messages:
+                    log_request_messages = _normalize_responses_input(pre_compression_input)
+                    log_compressed_messages = _normalize_responses_input(body.get("input"))
+                else:
+                    log_request_messages = None
+                    log_compressed_messages = None
+
                 await self._record_request_outcome(
                     RequestOutcome(
                         request_id=request_id,
@@ -3592,9 +3629,8 @@ class OpenAIHandlerMixin:
                         num_messages=len(messages) if isinstance(messages, list) else 0,
                         tags=_resp_log_tags,
                         turn_id=compute_turn_id(model, body.get("instructions"), messages),
-                        request_messages=messages
-                        if getattr(self.config, "log_full_messages", False)
-                        else None,
+                        request_messages=log_request_messages,
+                        compressed_messages=log_compressed_messages,
                         client=client,
                     )
                 )
