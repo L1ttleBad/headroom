@@ -207,22 +207,23 @@ class AnchorConfig:
 # Glob: Returns compact file path lists used for navigation. Low token count,
 #   not worth compressing.
 # Tool outputs that are reference data and must NOT be compressed.
-# Read/Glob/Grep contain exact file contents/search results the agent needs for edits.
+# Read/Glob contain exact file contents/path lists the agent needs for edits.
 # Write/Edit record what changes were made — compressing them causes duplicate/conflicting edits.
+# Grep is NOT excluded: its results dominate context growth and the
+# SearchCompressor (conservative profile, see DEFAULT_TOOL_PROFILES) keeps the
+# most relevant matches while offloading the rest via CCR. To protect grep (or
+# any non-excluded tool) from lossy compression, use
+# HEADROOM_PROTECT_TOOL_RESULTS=Grep or --protect-tool-results Grep.
 # Bash is NOT excluded — its outputs (build logs, test output) are ideal compression targets.
-# To protect Bash or other non-excluded tools from lossy compression, use
-# HEADROOM_PROTECT_TOOL_RESULTS=Bash or --protect-tool-results Bash.
 DEFAULT_EXCLUDE_TOOLS: frozenset[str] = frozenset(
     {
         "Read",
         "Glob",
-        "Grep",
         "Write",
         "Edit",
         # Lowercase variants for case-insensitive matching
         "read",
         "glob",
-        "grep",
         "write",
         "edit",
     }
