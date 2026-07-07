@@ -734,6 +734,23 @@ _JSON_BLOCK_START = re.compile(r"^\s*[\[{]", re.MULTILINE)
 _SEARCH_RESULT_PATTERN = re.compile(r"^[^\s:]+[-:]\d+[-:]", re.MULTILINE)
 _PROSE_PATTERN = re.compile(r"[A-Z][a-z]+\s+\w+\s+\w+")
 
+# dyagent-style tool outputs are prefixed with a marker line such as
+# ``[Grep]tool result:``. That leading ``[`` trips ``_JSON_BLOCK_START`` on the
+# very first line, so any search-result payload scores 2 indicators
+# (has_json_blocks + has_search_results) and is forced down the MIXED strategy —
+# never reaching the dedicated SearchCompressor. Strip this marker purely for
+# the routing/detection decision; the marker is left untouched in the content
+# that actually gets compressed.
+_TOOL_RESULT_MARKER_PATTERN = re.compile(
+    r"\A[ \t]*\[[A-Za-z][\w.\-]*\][ \t]*tool result:[ \t]*\r?\n",
+    re.IGNORECASE,
+)
+
+
+def _strip_tool_result_marker(content: str) -> str:
+    """Drop a leading ``[Tool]tool result:`` marker line before classification."""
+    return _TOOL_RESULT_MARKER_PATTERN.sub("", content, count=1)
+
 
 def is_mixed_content(content: str) -> bool:
     """Detect if content contains multiple distinct types.
@@ -1184,8 +1201,11 @@ class ContentRouter(Transform):
                 detection = DetectionResult(ContentType.PLAIN_TEXT, 1.0, {})
                 strategy = CompressionStrategy.KOMPRESS
             else:
-                mixed = is_mixed_content(content)
-                detection = _detect_content(content)
+                # Mirror `_determine_strategy`: classify on the payload minus
+                # any leading tool-result marker so debug logs match routing.
+                classify_content = _strip_tool_result_marker(content)
+                mixed = is_mixed_content(classify_content)
+                detection = _detect_content(classify_content)
                 strategy = self._determine_strategy(content)
             if debug_enabled:
                 _log_router_debug(
@@ -1286,12 +1306,30 @@ class ContentRouter(Transform):
         Returns:
             Selected compression strategy.
         """
+        # Classify on the payload minus any leading ``[Tool]tool result:``
+        # marker, so the marker's ``[`` does not force MIXED routing. The
+        # marker stays in `content` for the actual compression step.
+        classify_content = _strip_tool_result_marker(content)
+
         # 1. Check for mixed content
-        if is_mixed_content(content):
+        if is_mixed_content(classify_content):
             return CompressionStrategy.MIXED
 
         # 2. Detect content type from content itself
-        detection = _detect_content(content)
+        detection = _detect_content(classify_content)
+
+        # 3. Prefer the pure-Python search detector for grep/ripgrep output.
+        # Search results whose matched lines contain source code (e.g. Go/py
+        # snippets in ``file:line:`` / ``file-line-`` rows) get labeled
+        # SOURCE_CODE by the native detector, which routes them to
+        # CodeAware/Kompress instead of the dedicated SearchCompressor. The
+        # regex detector recognizes the file:line prefix as search results, so
+        # when it confidently says SEARCH_RESULTS we honor that.
+        if detection.content_type is not ContentType.SEARCH_RESULTS:
+            regex_detection = _regex_detect_content_type(classify_content)
+            if regex_detection.content_type is ContentType.SEARCH_RESULTS:
+                detection = regex_detection
+
         return self._strategy_from_detection(detection)
 
     def _strategy_from_detection(self, detection: Any) -> CompressionStrategy:
